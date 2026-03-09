@@ -3,111 +3,165 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>AI Chatbot</title>
+<title>AI Chatbot (No Login)</title>
 <style>
-  body { margin:0; background:#0b1120; color:white; font-family:sans-serif; }
-  .box { max-width:850px; margin:0 auto; padding:20px; }
-  h1 { font-size:26px; margin-bottom:10px; }
-  #chat { background:#111827; border:1px solid #2b3648; padding:16px; border-radius:16px; height:70vh; overflow-y:auto; display:flex; flex-direction:column; gap:12px; }
-  .msg { padding:12px 14px; border-radius:12px; line-height:1.5; white-space:pre-wrap; }
-  .user { background:#1e293b; align-self:flex-end; }
-  .bot  { background:#0f172a; border:1px solid #374151; }
-  .controls { margin-top:12px; display:flex; gap:8px; }
-  textarea { flex:1; padding:12px; border-radius:10px; border:none; background:#0b1324; color:white; resize:vertical; min-height:60px; }
-  button { padding:12px 20px; border-radius:10px; border:none; background:#2563eb; color:white; font-weight:bold; cursor:pointer; }
-  #status { font-size:12px; opacity:.8; margin-top:6px; }
+  :root{ --bg:#0b1120; --card:#0f172a; --muted:#1f2937; --accent:#2563eb; --text:#e6edf3; --dim:#9aa6bf; --warn:#f59e0b; --err:#ef4444; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Roboto,Inter,sans-serif}
+  .wrap{max-width:900px;margin:0 auto;padding:16px}
+  h1{margin:4px 0 10px;font-size:22px}
+  #status{font-size:12px;color:var(--dim);margin-bottom:10px}
+  #status .bad{color:var(--err)} #status .warn{color:var(--warn)}
+  .chat{height:65vh;min-height:360px;background:var(--card);border:1px solid var(--muted);border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px;overflow:auto}
+  .msg{padding:10px 12px;border-radius:12px;line-height:1.55;white-space:pre-wrap}
+  .user{background:#1e293b;align-self:flex-end}
+  .bot{background:#0f172a;border:1px solid #374151}
+  .controls{margin-top:12px;display:flex;gap:8px}
+  textarea{flex:1;background:#0b1324;color:var(--text);border:1px solid #32425a;border-radius:12px;padding:12px;min-height:70px;resize:vertical}
+  button{background:var(--accent);color:white;border:none;padding:12px 16px;border-radius:12px;font-weight:700;cursor:pointer}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+  select{background:#0b1324;color:var(--text);border:1px solid #32425a;border-radius:12px;padding:8px}
+  .spinner{width:14px;height:14px;border:2px solid #9ab3ff;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin .8s linear infinite;margin-left:6px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 </style>
 </head>
 <body>
-<div class="box">
-  <h1>AI Chatbot</h1>
-  <div id="status">Loading AI model… please wait</div>
+<div class="wrap">
+  <h1>🤖 AI Chatbot</h1>
+  <div id="status">Initializing…</div>
 
-  <div id="chat"></div>
+  <div class="row">
+    <label for="model">Model</label>
+    <select id="model">
+      <option value="Phi-3-mini-4k-instruct-q4f16_1-MLC" selected>Phi-3 Mini 4K (tiny, good)</option>
+      <option value="Llama-3.2-1B-Instruct-q4f16_1-MLC">Llama 3.2 1B (very small, fast)</option>
+    </select>
+    <button id="reload">Reload model</button>
+  </div>
+
+  <div id="chat" class="chat"></div>
 
   <div class="controls">
-    <textarea id="input" placeholder="Type a message..."></textarea>
+    <textarea id="input" placeholder="Type a message… (Shift+Enter for new line)"></textarea>
     <button id="send" disabled>Send</button>
   </div>
 </div>
 
 <script type="module">
-import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+/**
+ * IMPORTANT: We pin a specific version of web-llm to keep API stable.
+ * If you change the version, API names might differ again.
+ */
+import * as webllm from "https://esm.run/@mlc-ai/web-llm@0.2.50";
 
 const chat = document.getElementById("chat");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
 const status = document.getElementById("status");
+const modelSel = document.getElementById("model");
+const reloadBtn = document.getElementById("reload");
 
 let engine = null;
-let convo = null;
+let generating = false;
 
-function addMsg(text, role) {
+function setStatus(html){ status.innerHTML = html; }
+function addMsg(text, role){
   const div = document.createElement("div");
   div.className = "msg " + role;
   div.textContent = text;
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
+  return div;
 }
+function hasWebGPU(){ return !!navigator.gpu; }
 
-async function loadModel() {
-  status.innerHTML = "Loading AI model… this may take 20–60 seconds ⏳";
+async function loadModel(){
+  send.disabled = true;
+  const name = modelSel.value;
+
+  const useWasmFallback = !hasWebGPU();
+  if (useWasmFallback) {
+    setStatus(`⚠️ <span class="warn">WebGPU not available</span>. Falling back to CPU (wasm). For best performance, use latest Edge/Chrome with WebGPU.`);
+  } else {
+    setStatus(`Loading model <span class="mono">${name}</span> (WebGPU)… <span class="spinner"></span>`);
+  }
 
   try {
-    engine = await webllm.createEngine({
-      model: "Phi-3-mini-4k-instruct-q4f16_1-MLC",
-      chatOptions: { temperature: 0.3, maxTokens: 200 }
+    // ✅ NEW API: CreateMLCEngine (replaces createEngine)
+    engine = await webllm.CreateMLCEngine({
+      model: name,
+      // web-llm auto-selects backend. We hint via this env option:
+      // "webgpu" preferred, otherwise wasm fallback
+      // Some versions use "initProgressCallback" & "appConfig"
+      initProgressCallback: (p) => {
+        if (!p) return;
+        // p.progress (0..1), p.text (phase info)
+        setStatus(`Loading model <span class="mono">${name}</span>… ${(p.progress*100).toFixed(0)}% — ${p.text}`);
+      },
     });
-    
-    convo = new webllm.ChatCompletion(engine);
-    status.textContent = "Model ready! 🎉 You can start chatting.";
+
+    setStatus(`✅ Model ready: <span class="mono">${name}</span>`);
     send.disabled = false;
-
-    addMsg("Hello! I’m your AI assistant. How can I help you today?", "bot");
-
+    if (chat.children.length === 0) {
+      addMsg("Hi! I’m your private, in-browser AI. How can I help?", "bot");
+    }
   } catch (err) {
     console.error(err);
-    status.textContent = "Failed to load the AI model. Try refreshing the page.";
+    const msg = (err && err.message) ? err.message : String(err);
+    setStatus(`❌ <span class="bad">Model failed to load.</span> ${msg.includes('WebGPU') ? '(WebGPU issue)' : ''} Try switching model, hard refresh (Ctrl/Cmd+Shift+R), or enabling WebGPU flags. See console for details.`);
+    addMsg("Model failed to load. Try the other model or refresh the page.", "bot");
+    engine = null; send.disabled = true;
   }
 }
 
-async function handleSend() {
+async function handleSend(){
+  if (!engine || generating) return;
   const text = input.value.trim();
   if (!text) return;
 
   input.value = "";
   addMsg(text, "user");
+  generating = true; send.disabled = true;
 
-  let reply = "";
-  const stream = await convo.chat({
-    messages: [
-      { role: "system", content: "You are a helpful, friendly assistant." },
-      { role: "user", content: text }
-    ],
-    stream: true
-  });
+  try {
+    // ✅ NEW OpenAI-like API for chat
+    const stream = await engine.chat.completions.create({
+      messages: [
+        { role: "system", content: "You are a helpful, friendly assistant. Keep answers clear and concise." },
+        { role: "user", content: text }
+      ],
+      stream: true,
+      temperature: 0.3,
+      max_tokens: 256
+    });
 
-  const botBubble = document.createElement("div");
-  botBubble.className = "msg bot";
-  chat.appendChild(botBubble);
-
-  for await (const part of stream) {
-    const chunk = part?.choices?.[0]?.delta?.content ?? "";
-    reply += chunk;
-    botBubble.textContent = reply;
-    chat.scrollTop = chat.scrollHeight;
+    const botDiv = addMsg("", "bot");
+    let acc = "";
+    for await (const part of stream) {
+      const chunk = part?.choices?.[0]?.delta?.content ?? "";
+      if (chunk) {
+        acc += chunk;
+        botDiv.textContent = acc;
+        chat.scrollTop = chat.scrollHeight;
+      }
+    }
+  } catch (err) {
+    console.error(err);
+    addMsg("Generation error. Please try again.", "bot");
+  } finally {
+    generating = false; send.disabled = false;
   }
 }
 
 send.onclick = handleSend;
 input.addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    handleSend();
-  }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
 });
+reloadBtn.onclick = () => { loadModel(); };
 
-loadModel();
+window.addEventListener("DOMContentLoaded", () => { loadModel(); });
 </script>
 </body>
 </html>
